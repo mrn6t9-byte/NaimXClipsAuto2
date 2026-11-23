@@ -1,0 +1,182 @@
+name: Clipbot
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Leave empty: the bot asks you in Telegram. (Or a stream link: .m3u8 / .mpd / .ts)"
+        required: false
+        default: ""
+      wait_min:
+        description: "Waiting for your videos/links in Telegram: stop after N quiet minutes"
+        default: "20"
+      minutes:
+        description: "Stream links: stop after N minutes (0 = until the stream ends)"
+        default: "0"
+      idle_min:
+        description: "Stream links: stop when the stream sends no data for N minutes"
+        default: "10"
+      stream_type:
+        description: "Stream links: auto, hls (.m3u8) or ts"
+        type: choice
+        options:
+          - auto
+          - hls
+          - ts
+        default: auto
+      mode:
+        description: "Stream links: auto, live or archive (finished timeshift file)"
+        type: choice
+        options:
+          - auto
+          - live
+          - archive
+        default: auto
+      name:
+        description: "Name"
+        default: "Clips"
+      part_mb:
+        description: "Stream links: a new part every N MB (clips are cut per part)"
+        default: "4000"
+      part_min:
+        description: "Stream links: optional, also every N minutes (0 = off)"
+        default: "0"
+      referer:
+        description: "Stream links: optional website the link is played on"
+        required: false
+        default: ""
+      chat:
+        description: "Filled by the bot"
+        required: false
+        default: ""
+      msg:
+        description: "Filled by the bot"
+        required: false
+        default: ""
+      file_id:
+        description: "Filled by the bot (Telegram video)"
+        required: false
+        default: ""
+      size:
+        description: "Filled by the bot"
+        required: false
+        default: ""
+      link:
+        description: "Filled by the bot (video file link)"
+        required: false
+        default: ""
+      caption:
+        description: "Words like: pre 30 wpre 30 post 15"
+        required: false
+        default: ""
+      feed:
+        description: "Live score page link (Cricbuzz match page): names, ball-by-ball, dashboard details, and a 4/6/wicket the screen reading missed. Optional."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: write      # a long live recording continues in a new run
+
+jobs:
+  clips:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      PYTHONUNBUFFERED: "1"
+      PARALLEL: "32"
+      PAR_CHUNK_MB: "16"
+      TS_PAR: "8"
+      MIN_FREE_GB: "12"
+      LIVE_CARD: "1"
+      CLIPS: "1"
+      CLIPS_ONLY: "1"              # only the clips are kept and sent, the recording itself is not uploaded
+      WORKFLOW_FILE: clipbot.yml
+      TG_TOKEN: ${{ secrets.TG_TOKEN }}
+      TG_CHAT: ${{ secrets.TG_CHAT }}          # your Telegram id: only you can use the bot
+      OWNER_ID: ${{ secrets.TG_CHAT }}
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+      CLIP_CHAT: ${{ secrets.CLIP_CHAT }}      # optional: channel/group that gets the clips (else the chat that sent the video)
+      PROXY: ${{ secrets.PROXY }}
+      GOFILE_WT_SECRET: ${{ secrets.GOFILE_WT_SECRET }}      # optional: only if Gofile changes its download system
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.run_id }}
+      URL: ${{ inputs.url }}
+      WAIT_MIN: ${{ inputs.wait_min }}
+      MINUTES: ${{ inputs.minutes }}
+      IDLE_STOP_MIN: ${{ inputs.idle_min }}
+      STREAM_TYPE: ${{ inputs.stream_type }}
+      MODE: ${{ inputs.mode }}
+      NAME: ${{ inputs.name }}
+      PART_MB: ${{ inputs.part_mb }}
+      PART_MIN: ${{ inputs.part_min }}
+      REFERER: ${{ inputs.referer }}
+      CHAT: ${{ inputs.chat }}
+      MSG: ${{ inputs.msg }}
+      FILE_ID: ${{ inputs.file_id }}
+      FILE_SIZE: ${{ inputs.size }}
+      LINK: ${{ inputs.link }}
+      CAPTION: ${{ inputs.caption }}
+      FEED_URL: ${{ inputs.feed }}
+      OUT_DIR: /mnt/rec
+      MP4_DIR: rec_mp4
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install ffmpeg (latest)
+        timeout-minutes: 12
+        run: |
+          # The newest ffmpeg is downloaded straight from GitHub (fast, no apt mirror needed). apt is only the backup.
+          export DEBIAN_FRONTEND=noninteractive
+          have() { command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; }
+          if have; then echo "ffmpeg already installed"; ffmpeg -version | head -1; exit 0; fi
+          echo "== try 1: newest build from GitHub"
+          mkdir -p /tmp/ff && cd /tmp/ff
+          curl -fsSL --retry 3 --connect-timeout 20 --max-time 200 -o ff.tar.xz \
+            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz \
+            && tar xf ff.tar.xz --strip-components=1 \
+            && sudo cp bin/ffmpeg bin/ffprobe /usr/local/bin/ || true
+          cd - >/dev/null
+          if ! have; then
+            echo "== try 2: apt (switching the Azure mirror that fails to the main Ubuntu one)"
+            sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' /etc/apt/apt-mirrors.txt 2>/dev/null || true
+            APT="-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
+            sudo timeout -k 5 60 apt-get $APT update -qq || true
+            sudo timeout -k 5 120 apt-get $APT install -y -qq --no-install-recommends ffmpeg || true
+          fi
+          if ! have; then
+            echo "== try 3: static build"
+            mkdir -p /tmp/ff2 && cd /tmp/ff2
+            curl -fsSL --retry 3 --connect-timeout 20 --max-time 150 -o ff.tar.xz \
+              https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+              && tar xf ff.tar.xz --strip-components=1 \
+              && sudo cp ffmpeg ffprobe /usr/local/bin/ || true
+            cd - >/dev/null
+          fi
+          if have; then ffmpeg -version | head -1; else echo "::error title=ffmpeg could not be installed::All 3 ways failed. Press Re-run jobs once more."; exit 1; fi
+      - name: Picture dashboard tools
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          python3 -c "import PIL" 2>/dev/null || pip install -q --break-system-packages --upgrade pillow
+          python3 -c "import PIL; print('Pillow', PIL.__version__)"
+      - name: Big clip sender (only if API_ID is set)
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          if [ -n "$API_ID" ] && [ -n "$API_HASH" ]; then pip install -q --break-system-packages telethon && echo "telethon ready"; else echo "API_ID not set: clips over 50 MB are compressed instead"; fi
+      - name: Text reader and Telegram big-file tools
+        timeout-minutes: 10
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq --no-install-recommends tesseract-ocr tesseract-ocr-eng || true
+          pip install -q --break-system-packages telethon
+          tesseract --version | head -1
+      - name: Use the second disk for recording
+        run: sudo mkdir -p /mnt/rec && sudo chown "$USER" /mnt/rec
+      - name: Cut the clips
+        run: python3 clipbot.py
+      - name: Upload leftovers if cancelled
+        if: always()
+        run: python3 cliprec.py finish

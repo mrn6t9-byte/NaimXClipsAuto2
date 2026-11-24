@@ -11,6 +11,19 @@ on:
         default: "20"
       minutes:
         description: "Stream links: stop after N minutes (0 = until the stream ends)"
+name: Clipbot
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Leave empty: the bot asks you in Telegram. (Or a stream link: .m3u8 / .mpd / .ts)"
+        required: false
+        default: ""
+      wait_min:
+        description: "Waiting for your videos/links in Telegram: stop after N quiet minutes"
+        default: "20"
+      minutes:
+        description: "Stream links: stop after N minutes (0 = until the stream ends)"
         default: "0"
       idle_min:
         description: "Stream links: stop when the stream sends no data for N minutes"
